@@ -102,6 +102,26 @@ INDEX_HTML = """<!DOCTYPE html>
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--ok); display: inline-block;
   }
+  .slider-row {
+    margin-top: 14px;
+  }
+  .slider-row label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .slider-row label span {
+    color: var(--text);
+    font-weight: 600;
+  }
+  input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    height: 4px;
+    cursor: pointer;
+  }
 </style>
 </head>
 <body>
@@ -113,6 +133,17 @@ INDEX_HTML = """<!DOCTYPE html>
     <h2>Print text</h2>
     <form id="textForm">
       <textarea id="textInput" placeholder="Type something to print..."></textarea>
+
+      <div class="slider-row">
+        <label for="darknessInput">Darkness <span id="darknessVal">3</span></label>
+        <input type="range" id="darknessInput" min="1" max="5" step="1" value="3">
+      </div>
+
+      <div class="slider-row">
+        <label for="fontSizeInput">Font size <span id="fontSizeVal">Medium</span></label>
+        <input type="range" id="fontSizeInput" min="0" max="4" step="1" value="2">
+      </div>
+
       <button type="submit" id="textBtn">Print text</button>
     </form>
     <div class="status" id="textStatus"></div>
@@ -122,6 +153,12 @@ INDEX_HTML = """<!DOCTYPE html>
     <h2>Print image / PDF</h2>
     <form id="fileForm">
       <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.gif,.bmp,.pdf,.txt">
+
+      <div class="slider-row">
+        <label for="fileDarknessInput">Darkness <span id="fileDarknessVal">3</span></label>
+        <input type="range" id="fileDarknessInput" min="1" max="5" step="1" value="3">
+      </div>
+
       <button type="submit" id="fileBtn">Print file</button>
     </form>
     <div class="status" id="fileStatus"></div>
@@ -134,6 +171,35 @@ function setStatus(el, ok, message) {
   el.className = "status " + (ok ? "ok" : "err");
 }
 
+// Font-size slider: position -> [text-columns value, display label].
+// Fewer columns means the same paper width is divided among fewer
+// characters, so each character renders larger.
+const FONT_STEPS = [
+  { columns: 48, label: "Tiny" },
+  { columns: 40, label: "Small" },
+  { columns: 32, label: "Medium" },
+  { columns: 24, label: "Large" },
+  { columns: 16, label: "Extra Large" }
+];
+
+const darknessInput = document.getElementById("darknessInput");
+const darknessVal = document.getElementById("darknessVal");
+darknessInput.addEventListener("input", () => {
+  darknessVal.textContent = darknessInput.value;
+});
+
+const fontSizeInput = document.getElementById("fontSizeInput");
+const fontSizeVal = document.getElementById("fontSizeVal");
+fontSizeInput.addEventListener("input", () => {
+  fontSizeVal.textContent = FONT_STEPS[fontSizeInput.value].label;
+});
+
+const fileDarknessInput = document.getElementById("fileDarknessInput");
+const fileDarknessVal = document.getElementById("fileDarknessVal");
+fileDarknessInput.addEventListener("input", () => {
+  fileDarknessVal.textContent = fileDarknessInput.value;
+});
+
 document.getElementById("textForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const btn = document.getElementById("textBtn");
@@ -141,13 +207,16 @@ document.getElementById("textForm").addEventListener("submit", async (e) => {
   const text = document.getElementById("textInput").value.trim();
   if (!text) return;
 
+  const darkness = parseInt(darknessInput.value, 10);
+  const textColumns = FONT_STEPS[fontSizeInput.value].columns;
+
   btn.disabled = true;
   btn.textContent = "Printing...";
   try {
     const res = await fetch("print/text", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text, darkness, text_columns: textColumns })
     });
     const data = await res.json();
     if (res.ok) {
@@ -173,6 +242,7 @@ document.getElementById("fileForm").addEventListener("submit", async (e) => {
 
   const formData = new FormData();
   formData.append("file", fileInput.files[0]);
+  formData.append("darkness", fileDarknessInput.value);
 
   btn.disabled = true;
   btn.textContent = "Printing...";
@@ -206,14 +276,18 @@ PRINTER_MODEL = os.environ.get("PRINTER_MODEL", "").strip()
 PRINTER_BLUETOOTH = os.environ.get("PRINTER_BLUETOOTH", "").strip()
 
 
-def build_cmd(target_path=None, text=None):
+def build_cmd(target_path=None, text=None, darkness=None, text_columns=None):
     cmd = ["python3", TIMINI_CLI]
     if PRINTER_BLUETOOTH:
         cmd += ["--bluetooth", PRINTER_BLUETOOTH]
     if PRINTER_MODEL:
         cmd += ["--printer-model", PRINTER_MODEL]
+    if darkness is not None:
+        cmd += ["--darkness", str(darkness)]
     if text is not None:
         cmd += ["--text", text]
+        if text_columns is not None:
+            cmd += ["--text-columns", str(text_columns)]
     elif target_path is not None:
         cmd += [target_path]
     return cmd
@@ -237,6 +311,22 @@ def index():
     return Response(INDEX_HTML, mimetype="text/html")
 
 
+def parse_darkness(value):
+    try:
+        d = int(value)
+    except (TypeError, ValueError):
+        return None
+    return d if 1 <= d <= 5 else None
+
+
+def parse_text_columns(value):
+    try:
+        c = int(value)
+    except (TypeError, ValueError):
+        return None
+    return c if 8 <= c <= 80 else None
+
+
 @app.route("/print/text", methods=["POST"])
 def print_text():
     data = request.get_json(force=True, silent=True) or {}
@@ -244,8 +334,13 @@ def print_text():
     if not text:
         return jsonify({"error": "missing 'text' field in JSON body"}), 400
 
+    darkness = parse_darkness(data.get("darkness"))
+    text_columns = parse_text_columns(data.get("text_columns"))
+
     with print_lock:
-        ok, output = run_print(build_cmd(text=text))
+        ok, output = run_print(
+            build_cmd(text=text, darkness=darkness, text_columns=text_columns)
+        )
 
     if not ok:
         return jsonify({"error": output}), 500
@@ -259,6 +354,7 @@ def print_file():
 
     f = request.files["file"]
     suffix = os.path.splitext(f.filename or "")[1] or ".png"
+    darkness = parse_darkness(request.form.get("darkness"))
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         f.save(tmp.name)
@@ -266,7 +362,9 @@ def print_file():
 
     try:
         with print_lock:
-            ok, output = run_print(build_cmd(target_path=tmp_path), timeout=90)
+            ok, output = run_print(
+                build_cmd(target_path=tmp_path, darkness=darkness), timeout=90
+            )
     finally:
         os.unlink(tmp_path)
 
