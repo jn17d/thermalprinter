@@ -272,6 +272,14 @@ document.getElementById("fileForm").addEventListener("submit", async (e) => {
 print_lock = threading.Lock()
 
 TIMINI_CLI = "/app/timini/timiniprint_command_line.py"
+# Monospace bold TrueType font bundled with this add-on. Upstream TiMini Print
+# scales the rendered text by binary-searching the largest font size that fits
+# the requested text_columns within the paper width, but ONLY if a real TTF is
+# provided. The stripped-down Alpine base image ships no fonts and no fc-match,
+# so without pinning --text-font to this bundled file the "Font size" slider
+# would silently have no effect (Pillow would fall back to its fixed-size
+# bitmap font). See print/text flow and Dockerfile.
+TEXT_FONT = "/app/DejaVuSansMono-Bold.ttf"
 PRINTER_MODEL = os.environ.get("PRINTER_MODEL", "").strip()
 PRINTER_BLUETOOTH = os.environ.get("PRINTER_BLUETOOTH", "").strip()
 
@@ -286,6 +294,9 @@ def build_cmd(target_path=None, text=None, darkness=None, text_columns=None):
         cmd += ["--darkness", str(darkness)]
     if text is not None:
         cmd += ["--text", text]
+        # Pin a real TrueType font so upstream's column->font-size scaling works
+        # in the font-shipless Alpine container (see TEXT_FONT above).
+        cmd += ["--text-font", TEXT_FONT]
         if text_columns is not None:
             cmd += ["--text-columns", str(text_columns)]
     elif target_path is not None:

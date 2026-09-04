@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir --break-system-packages -r /app/timini/requiremen
 
 COPY run.sh /run.sh
 COPY app/print_server.py /app/print_server.py
+# Monospace bold font used by the "Font size" slider for text printing.
+# The Alpine base image ships no fonts, so upstream TiMini Print can't scale
+# text without this pinned copy (see TEXT_FONT in print_server.py).
+COPY app/assets/DejaVuSansMono-Bold.ttf /app/DejaVuSansMono-Bold.ttf
 RUN chmod a+x /run.sh
 
 CMD [ "/run.sh" ]

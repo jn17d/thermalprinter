@@ -29,6 +29,12 @@ the TiMini Print CLI's default behavior.
   .pdf, .txt supported — see TiMini Print's supported formats)
 - `GET /health` — basic liveness check
 
+- `POST /print/text` also accepts `darkness` (1-5) and `text_columns` (8-80,
+  fewer = larger glyphs). The web UI's "Font size" slider posts `text_columns`.
+  A bundled `DejaVuSansMono-Bold.ttf` is pinned via `--text-font` so upstream
+  TiMini Print can scale the text (it needs a real TTF; the Alpine base image
+  ships no fonts, which is why the slider previously had no effect).
+
 ## Example: Home Assistant `rest_command`
 
 ```yaml
