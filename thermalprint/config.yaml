@@ -1,5 +1,5 @@
 name: "Thermal Print Bridge"
-version: "0.1.0"
+version: "0.1.1"
 slug: "thermalprint"
 description: "HTTP bridge for cheap Chinese Bluetooth thermal printers (TiMini Print protocol)"
 url: "https://github.com/jn17d/thermalprinter"
