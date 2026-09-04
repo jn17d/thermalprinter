@@ -12,10 +12,14 @@ host_dbus: true
 host_network: true
 startup: application
 boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:printer
+panel_title: "Thermal Printer"
 ports:
   8099/tcp: 8099
 ports_description:
-  8099/tcp: "HTTP API for print requests"
+  8099/tcp: "HTTP API for print requests (also reachable via Ingress in the sidebar)"
 options:
   printer_model: ""
   printer_bluetooth: ""

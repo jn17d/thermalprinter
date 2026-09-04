@@ -3,9 +3,199 @@ import subprocess
 import tempfile
 import threading
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
+
+INDEX_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thermal Print Bridge</title>
+<style>
+  :root {
+    --bg: #16181d;
+    --panel: #1f2229;
+    --border: #2c303a;
+    --text: #e8eaed;
+    --muted: #9aa0ac;
+    --accent: #ff7a45;
+    --accent-hover: #ff8f63;
+    --ok: #4caf7d;
+    --err: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .wrap { width: 100%; max-width: 480px; }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  textarea, input[type="file"] {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    resize: vertical;
+  }
+  textarea { min-height: 90px; }
+  input[type="file"] { padding: 8px; }
+  button {
+    margin-top: 12px;
+    width: 100%;
+    background: var(--accent);
+    color: #1a1a1a;
+    border: none;
+    border-radius: 8px;
+    padding: 11px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  button:hover { background: var(--accent-hover); }
+  button:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+  .status {
+    margin-top: 12px;
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    display: none;
+  }
+  .status.ok { display: block; background: rgba(76,175,125,0.12); color: var(--ok); }
+  .status.err { display: block; background: rgba(229,72,77,0.12); color: var(--err); }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ok); display: inline-block;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="dot"></span> Thermal Print Bridge</h1>
+  <div class="sub">Send text or images straight to your Bluetooth thermal printer.</div>
+
+  <div class="card">
+    <h2>Print text</h2>
+    <form id="textForm">
+      <textarea id="textInput" placeholder="Type something to print..."></textarea>
+      <button type="submit" id="textBtn">Print text</button>
+    </form>
+    <div class="status" id="textStatus"></div>
+  </div>
+
+  <div class="card">
+    <h2>Print image / PDF</h2>
+    <form id="fileForm">
+      <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.gif,.bmp,.pdf,.txt">
+      <button type="submit" id="fileBtn">Print file</button>
+    </form>
+    <div class="status" id="fileStatus"></div>
+  </div>
+</div>
+
+<script>
+function setStatus(el, ok, message) {
+  el.textContent = message;
+  el.className = "status " + (ok ? "ok" : "err");
+}
+
+document.getElementById("textForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("textBtn");
+  const status = document.getElementById("textStatus");
+  const text = document.getElementById("textInput").value.trim();
+  if (!text) return;
+
+  btn.disabled = true;
+  btn.textContent = "Printing...";
+  try {
+    const res = await fetch("print/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      setStatus(status, true, "Printed successfully.");
+      document.getElementById("textInput").value = "";
+    } else {
+      setStatus(status, false, "Error: " + (data.error || "unknown error"));
+    }
+  } catch (err) {
+    setStatus(status, false, "Request failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Print text";
+  }
+});
+
+document.getElementById("fileForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("fileBtn");
+  const status = document.getElementById("fileStatus");
+  const fileInput = document.getElementById("fileInput");
+  if (!fileInput.files.length) return;
+
+  const formData = new FormData();
+  formData.append("file", fileInput.files[0]);
+
+  btn.disabled = true;
+  btn.textContent = "Printing...";
+  try {
+    const res = await fetch("print/file", { method: "POST", body: formData });
+    const data = await res.json();
+    if (res.ok) {
+      setStatus(status, true, "Printed successfully.");
+      fileInput.value = "";
+    } else {
+      setStatus(status, false, "Error: " + (data.error || "unknown error"));
+    }
+  } catch (err) {
+    setStatus(status, false, "Request failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Print file";
+  }
+});
+</script>
+</body>
+</html>
+"""
 
 # Bluetooth on these printers only tolerates one active connection at a time.
 # This lock makes sure concurrent requests queue instead of colliding.
@@ -40,6 +230,11 @@ def run_print(cmd, timeout=60):
     if result.returncode != 0:
         return False, result.stderr.strip() or result.stdout.strip() or "Unknown error"
     return True, result.stdout.strip()
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return Response(INDEX_HTML, mimetype="text/html")
 
 
 @app.route("/print/text", methods=["POST"])
