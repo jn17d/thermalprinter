@@ -1,0 +1,24 @@
+name: "Thermal Print Bridge"
+version: "0.1.0"
+slug: "thermalprint"
+description: "HTTP bridge for cheap Chinese Bluetooth thermal printers (TiMini Print protocol)"
+url: "https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+host_dbus: true
+host_network: true
+startup: application
+boot: auto
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "HTTP API for print requests"
+options:
+  printer_model: ""
+  printer_bluetooth: ""
+schema:
+  printer_model: "str?"
+  printer_bluetooth: "str?"
