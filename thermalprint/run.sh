@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
 set -e
 
-# On standard HA base images, bashio is available and reads options.json
-# (populated from your add-on's config panel) into shell variables.
-if command -v bashio >/dev/null 2>&1; then
-    export PRINTER_MODEL="$(bashio::config 'printer_model')"
-    export PRINTER_BLUETOOTH="$(bashio::config 'printer_bluetooth')"
-    export DISCORD_ENABLED="$(bashio::config 'discord_enabled')"
-    export DISCORD_BOT_TOKEN="$(bashio::config 'discord_bot_token')"
-    export DISCORD_CHANNEL_ID="$(bashio::config 'discord_channel_id')"
-    export DISCORD_ALLOWED_USER_IDS="$(bashio::config 'discord_allowed_user_ids')"
-else
-    export PRINTER_MODEL="${PRINTER_MODEL:-}"
-    export PRINTER_BLUETOOTH="${PRINTER_BLUETOOTH:-}"
-    export DISCORD_ENABLED="${DISCORD_ENABLED:-false}"
-    export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
-    export DISCORD_CHANNEL_ID="${DISCORD_CHANNEL_ID:-}"
-    export DISCORD_ALLOWED_USER_IDS="${DISCORD_ALLOWED_USER_IDS:-}"
-fi
+# bashio::config was unreliable in this environment (silently returned
+# "command not found" while still hitting the success branch), so options
+# are read directly from /data/options.json with Python instead.
+read_opt() {
+    python3 - "$1" <<'PYEOF'
+import json, sys
+key = sys.argv[1]
+try:
+    with open("/data/options.json") as f:
+        data = json.load(f)
+except FileNotFoundError:
+    data = {}
+value = data.get(key)
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PYEOF
+}
+
+export PRINTER_MODEL="$(read_opt printer_model)"
+export PRINTER_BLUETOOTH="$(read_opt printer_bluetooth)"
+export DISCORD_ENABLED="$(read_opt discord_enabled)"
+export DISCORD_BOT_TOKEN="$(read_opt discord_bot_token)"
+export DISCORD_CHANNEL_ID="$(read_opt discord_channel_id)"
+export DISCORD_ALLOWED_USER_IDS="$(read_opt discord_allowed_user_ids)"
 
 echo "Starting thermal print bridge (model='${PRINTER_MODEL}', bluetooth='${PRINTER_BLUETOOTH}')"
 
