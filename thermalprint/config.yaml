@@ -1,5 +1,5 @@
 name: "Thermal Print Bridge"
-version: "0.1.3"
+version: "0.2.0"
 slug: "thermalprint"
 description: "HTTP bridge for cheap Chinese Bluetooth thermal printers (TiMini Print protocol)"
 url: "https://github.com/jn17d/thermalprinter"
@@ -23,6 +23,14 @@ ports_description:
 options:
   printer_model: ""
   printer_bluetooth: ""
+  discord_enabled: false
+  discord_bot_token: ""
+  discord_channel_id: ""
+  discord_allowed_user_ids: ""
 schema:
   printer_model: "str?"
   printer_bluetooth: "str?"
+  discord_enabled: "bool"
+  discord_bot_token: "password"
+  discord_channel_id: "str?"
+  discord_allowed_user_ids: "str?"

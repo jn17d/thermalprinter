@@ -18,9 +18,35 @@ family, etc.), packaged as a Home Assistant add-on.
   device or your printer's Bluetooth name isn't recognized.
 - `printer_bluetooth`: pin to a specific Bluetooth name or MAC address if you
   have more than one supported printer nearby.
+- `discord_enabled`: turn on the Discord bot (off by default). No inbound
+  ports are opened for this — the bot only makes an outbound connection to
+  Discord's gateway.
+- `discord_bot_token`: your bot's token from the Discord Developer Portal.
+  Stored as a masked/password field.
+- `discord_channel_id`: the ID of the one channel the bot watches. Right-click
+  a channel with Developer Mode on to copy it.
+- `discord_allowed_user_ids`: optional comma-separated list of Discord user
+  IDs allowed to trigger prints. Leave blank to allow anyone who can post in
+  the configured channel.
 
-Leave both blank to auto-detect the first supported printer found, same as
-the TiMini Print CLI's default behavior.
+Leave `printer_model`/`printer_bluetooth` blank to auto-detect the first
+supported printer found, same as the TiMini Print CLI's default behavior.
+
+## Discord bot
+
+When enabled, the bot watches one channel:
+
+- An image or PDF attachment is forwarded to `/print/file` as-is.
+- A plain text message (no attachment) is forwarded to `/print/text` using
+  fixed defaults: darkness 3/5 ("normal") and 32 text columns ("medium" font
+  size) — the same defaults as the middle position of each slider in the web
+  UI. These aren't currently configurable per-message; edit
+  `DEFAULT_DARKNESS`/`DEFAULT_TEXT_COLUMNS` in `app/discord_bot.py` if you
+  want different fixed values.
+- The bot reacts with 🖨️ on success or ⚠️ on failure so you get feedback
+  without checking logs.
+- Font size (`text_columns`) has no effect on image/PDF attachments — TiMini
+  Print rasterizes those as-is, so only the darkness default applies to them.
 
 ## Endpoints
 
@@ -43,7 +69,7 @@ rest_command:
     url: "http://localhost:8099/print/text"
     method: POST
     content_type: "application/json"
-    payload: '{"text": "{{ message }}"}'
+    payload: '{"message": "{{ message }}"}'
 ```
 
 Call it from any automation with `service: rest_command.print_text` and a
@@ -59,7 +85,11 @@ Call it from any automation with `service: rest_command.print_text` and a
   namespace issue rather than a bug in this add-on.
 - Only one print job can run at a time (BLE connections don't multiplex
   well); concurrent requests queue via a simple lock rather than running in
-  parallel.
+  parallel. This applies to Discord-triggered prints too — they share the
+  same lock as the web UI.
 - The base image in the Dockerfile assumes an Alpine-based HA build image.
   If you change `BUILD_FROM` to a Debian-based one, swap `apk add` for
   `apt-get install` accordingly.
+- If `discord_enabled` is true but the token or channel ID is missing, the
+  add-on logs a warning and skips starting the bot rather than crashing the
+  whole add-on.
