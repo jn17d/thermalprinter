@@ -6,8 +6,10 @@ The old bridge connected, printed, and disconnected per job, so the printer
 spent its whole life disconnected and kept turning itself off.
 
 This manager keeps one TiMini-Print ``ConnectedPrinter`` open for as long as
-the bridge runs: the open BLE link itself is the keep-alive, which means zero
-wasted paper and zero stepper wear (no periodic feed/retract hacks).
+the bridge runs. On top of the open link, a periodic keep-alive runs
+``feed()`` + ``retract()`` (a net-zero paper wiggle) every 30 minutes, because
+some printers count idle *activity*, not connection time, when deciding to
+power off.
 
 It also supports deliberately *releasing* the printer so a phone app can use it:
 
@@ -74,6 +76,15 @@ TIMINI_SOURCE = os.environ.get("TIMINI_SOURCE", "/app/timini")
 # Dry-run mode: no Bluetooth, no TiMini-Print import, printer is faked.
 TIMINI_FAKE = os.environ.get("TIMINI_FAKE_PRINTER", "") == "1"
 
+# The open BLE link alone is not enough to stop some printers powering off
+# after ~1 hour of inactivity: their idle timer counts printer *activity*
+# (motor/protocol traffic), not just connection time. Periodically feed the
+# paper forward a few dots and retract it back so the printer sees activity.
+# 30 minutes is comfortably under the ~1 hour idle timeout.
+KEEPALIVE_INTERVAL_SECONDS = float(
+    os.environ.get("TIMINI_KEEPALIVE_INTERVAL", "") or 1800
+)
+
 DISABLED = "released"
 CONNECTING = "connecting"
 CONNECTED = "connected"
@@ -129,6 +140,12 @@ class FakeConnectedPrinter:
         log.info("FAKE print_file: %s", path)
         await asyncio.sleep(0.1)
 
+    async def feed(self, *, timeout: float = 1.0) -> None:
+        log.info("FAKE feed")
+
+    async def retract(self, *, timeout: float = 1.0) -> None:
+        log.info("FAKE retract")
+
     async def disconnect(self) -> None:
         log.info("FAKE disconnect")
 class PrinterManager:
@@ -154,6 +171,7 @@ class PrinterManager:
         self._closed = False
         self._thread = None
         self._maintain_task = None
+        self._keepalive_task = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -195,6 +213,7 @@ class PrinterManager:
             self._state = DISABLED
             self._detail = _RELEASED_DETAIL
         self._maintain_task = asyncio.create_task(self._maintain())
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         started.set()
     async def _maintain(self) -> None:
         """Background loop: keep the printer connected unless released.
@@ -231,6 +250,43 @@ class PrinterManager:
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
+
+    async def _keepalive_loop(self) -> None:
+        """Periodically nudge the printer so it never counts an idle hour.
+
+        Runs ``feed()`` + ``retract()`` (a net-zero paper wiggle) while the
+        printer is connected. Skips itself while released or mid-print, and on
+        any failure drops the link so ``_maintain`` reconnects.
+        """
+        while not self._closed:
+            try:
+                await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                raise
+
+            if self._closed or self._released or self._connected is None:
+                continue
+            # Skip if a print is in flight (or pending): it will keep the
+            # printer busy on its own, and interleaving protocol traffic
+            # with a job could corrupt the stream.
+            if self._print_lock.locked():
+                continue
+
+            try:
+                async with self._print_lock:
+                    if self._connected is None or self._released:
+                        continue
+                    await self._connected.feed()
+                    await self._connected.retract()
+                log.debug("Keep-alive feed/retract sent")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Keep-alive failed (%s); dropping link to reconnect", exc)
+                try:
+                    await self._drop_connection()
+                except Exception:  # noqa: BLE001
+                    log.exception("Keep-alive reconnect teardown failed")
 
     async def _attempt_connect(self) -> bool:
         """Try to establish one persistent connection. Returns success."""
@@ -581,6 +637,12 @@ class PrinterManager:
             self._maintain_task.cancel()
             try:
                 await self._maintain_task
+            except Exception:  # noqa: BLE001 - CancelledError included on 3.8
+                pass
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
             except Exception:  # noqa: BLE001 - CancelledError included on 3.8
                 pass
         if self._connected is not None:
