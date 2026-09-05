@@ -12,14 +12,17 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-# Pull in TiMini Print's CLI/protocol code directly.
-RUN git clone --depth 1 https://github.com/Dejniel/TiMini-Print.git /app/timini
+# Pull in TiMini Print's CLI/protocol code directly, pinned so the add-on
+# doesn't silently drift with upstream API changes.
+RUN git clone --depth 1 https://github.com/Dejniel/TiMini-Print.git /app/timini \
+    && git -C /app/timini checkout 5443e2d3bdb928b760da988a77e030258e393172
 
 RUN pip install --no-cache-dir --break-system-packages -r /app/timini/requirements.txt \
     && pip install --no-cache-dir --break-system-packages flask discord.py aiohttp
 
 COPY run.sh /run.sh
 COPY app/print_server.py /app/print_server.py
+COPY app/printer_manager.py /app/printer_manager.py
 COPY app/discord_bot.py /app/discord_bot.py
 # Monospace bold font used by the "Font size" slider for text printing.
 # The Alpine base image ships no fonts, so upstream TiMini Print can't scale

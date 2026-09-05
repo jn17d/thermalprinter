@@ -4,6 +4,11 @@ An HTTP wrapper around [TiMini Print](https://github.com/Dejniel/TiMini-Print) f
 cheap Chinese Bluetooth thermal printers (Tiny Print / Fun Print / cat printer
 family, etc.), packaged as a Home Assistant add-on.
 
+The bridge keeps a single Bluetooth connection to the printer open for as long
+as it runs. These printers auto power off after roughly an hour with no
+connection, so the open link is what stops the printer from turning itself off
+between jobs (no paper-wasting feed/retract keepalives needed).
+
 ## Before installing
 
 1. Pass your Bluetooth USB dongle through to the HAOS VM in Proxmox
@@ -48,11 +53,31 @@ When enabled, the bot watches one channel:
 - Font size (`text_columns`) has no effect on image/PDF attachments — TiMini
   Print rasterizes those as-is, so only the darkness default applies to them.
 
+## Connection & phone hand-off
+
+Printer-side, only one Bluetooth connection is allowed at a time. The bridge
+keeps the link open by default, but you can hand the printer back to a phone
+app:
+
+- **Hand off to phone** — the bridge drops the connection and *stops trying to
+  reconnect*, so apps like Tiny Print / Fun Print can connect normally. Print
+  requests during this state fail fast with a clear HTTP 503 message.
+- **Take back over** — the bridge starts connecting again immediately. If the
+  phone still holds the printer, connect attempts fail and the bridge retries
+  with an exponential backoff (5s → 60s) until the printer is free.
+
+The hand-off state is saved to `/data/printer_control.json`, so an HA/add-on
+restart doesn't silently grab the printer back out from under a phone.
+
 ## Endpoints
 
 - `POST /print/text` — JSON body `{"text": "..."}`
 - `POST /print/file` — multipart form upload, field name `file` (.png, .jpg,
   .pdf, .txt supported — see TiMini Print's supported formats)
+- `GET /printer/status` — JSON: `{state, released, model, address, detail,
+  fake}`; `state` is `connected` / `connecting` / `reconnecting` / `released`
+- `POST /printer/connection` — body `{"connected": true|false}`; `false` hands
+  the printer off to a phone app, `true` takes it back over
 - `GET /health` — basic liveness check
 
 - `POST /print/text` also accepts `darkness` (1-5) and `text_columns` (8-80,
@@ -84,9 +109,15 @@ Call it from any automation with `service: rest_command.print_text` and a
   / "Address family not supported" error, this is very likely a network
   namespace issue rather than a bug in this add-on.
 - Only one print job can run at a time (BLE connections don't multiplex
-  well); concurrent requests queue via a simple lock rather than running in
-  parallel. This applies to Discord-triggered prints too — they share the
-  same lock as the web UI.
+  well). The bridge serializes print jobs with the same lock that guards the
+  persistent connection, and reconnects (with retry) if the link drops mid-job.
+  This applies to Discord-triggered prints too — they share the same queue as
+  the web UI.
+- If the add-on is stopped for more than an hour (or HA restarts while the
+  printer is handed off to a phone), the printer may power itself off. A
+  powered-off printer can't be reached over Bluetooth, so it needs its power
+  button pressed once — after that the bridge picks it back up automatically
+  on the next reconnect attempt and prints resume working.
 - The base image in the Dockerfile assumes an Alpine-based HA build image.
   If you change `BUILD_FROM` to a Debian-based one, swap `apk add` for
   `apt-get install` accordingly.

@@ -1,11 +1,23 @@
+import atexit
+import logging
 import os
-import subprocess
 import tempfile
-import threading
 
 from flask import Flask, request, jsonify, Response
 
+from printer_manager import (
+    PrinterManager,
+    PrinterReleasedError,
+    PrinterUnavailableError,
+)
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+log = logging.getLogger("print_server")
+
 app = Flask(__name__)
+manager = PrinterManager()
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -122,12 +134,42 @@ INDEX_HTML = """<!DOCTYPE html>
     height: 4px;
     cursor: pointer;
   }
+  .printer-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .printer-meta { flex: 1; min-width: 0; }
+  .printer-state { font-size: 15px; font-weight: 600; color: var(--text); }
+  .printer-sub { font-size: 12px; color: var(--muted); margin-top: 2px; word-break: break-word; }
+  .dot.idle { background: var(--muted); }
+  .dot.busy { background: #f0b429; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .btn-secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { background: var(--border); }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1><span class="dot"></span> Thermal Print Bridge</h1>
   <div class="sub">Send text or images straight to your Bluetooth thermal printer.</div>
+
+  <div class="card">
+    <h2>Printer</h2>
+    <div class="printer-row">
+      <span class="dot idle" id="printerDot"></span>
+      <div class="printer-meta">
+        <div class="printer-state" id="printerState">Checking...</div>
+        <div class="printer-sub" id="printerDetail"></div>
+      </div>
+    </div>
+    <button type="button" id="printerToggle" class="btn-secondary" disabled>...</button>
+    <div class="status" id="printerStatus"></div>
+  </div>
 
   <div class="card">
     <h2>Print text</h2>
@@ -166,6 +208,79 @@ INDEX_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
+let printerReleased = false;
+
+const PRINTER_STATE_META = {
+  connected:    { cls: "ok",   label: "Connected" },
+  connecting:   { cls: "busy", label: "Connecting..." },
+  reconnecting: { cls: "busy", label: "Reconnecting..." },
+  released:     { cls: "idle", label: "Handed off to phone" },
+  unknown:      { cls: "idle", label: "Unknown" }
+};
+
+function renderPrinter(data) {
+  const meta = PRINTER_STATE_META[data.state] || PRINTER_STATE_META.unknown;
+  const dot = document.getElementById("printerDot");
+  dot.className = "dot " + meta.cls;
+
+  document.getElementById("printerState").textContent = meta.label;
+
+  const parts = [];
+  if (data.model) parts.push(data.model);
+  if (data.address) parts.push(data.address);
+  if (data.detail) parts.push(data.detail);
+  document.getElementById("printerDetail").textContent = parts.join(" - ");
+
+  const status = document.getElementById("printerStatus");
+  status.className = "status";
+  status.textContent = "";
+
+  const btn = document.getElementById("printerToggle");
+  btn.disabled = false;
+  btn.textContent = data.released ? "Take back over" : "Hand off to phone";
+}
+
+async function refreshPrinterStatus() {
+  try {
+    const res = await fetch("printer/status");
+    const data = await res.json();
+    printerReleased = !!data.released;
+    renderPrinter(data);
+  } catch (err) {
+    printerReleased = false;
+    renderPrinter({ state: "unknown", detail: "Status unavailable: " + err.message });
+  }
+}
+
+document.getElementById("printerToggle").addEventListener("click", async () => {
+  const btn = document.getElementById("printerToggle");
+  const status = document.getElementById("printerStatus");
+  btn.disabled = true;
+  try {
+    const res = await fetch("printer/connection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ connected: printerReleased })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      printerReleased = !!data.released;
+      renderPrinter(data);
+    } else {
+      status.className = "status err";
+      status.textContent = "Error: " + (data.error || "request failed");
+      btn.disabled = false;
+    }
+  } catch (err) {
+    status.className = "status err";
+    status.textContent = "Request failed: " + err.message;
+    btn.disabled = false;
+  }
+});
+
+refreshPrinterStatus();
+setInterval(refreshPrinterStatus, 3000);
+
 function setStatus(el, ok, message) {
   el.textContent = message;
   el.className = "status " + (ok ? "ok" : "err");
@@ -267,54 +382,17 @@ document.getElementById("fileForm").addEventListener("submit", async (e) => {
 </html>
 """
 
-# Bluetooth on these printers only tolerates one active connection at a time.
-# This lock makes sure concurrent requests queue instead of colliding.
-print_lock = threading.Lock()
-
-TIMINI_CLI = "/app/timini/timiniprint_command_line.py"
-# Monospace bold TrueType font bundled with this add-on. Upstream TiMini Print
-# scales the rendered text by binary-searching the largest font size that fits
-# the requested text_columns within the paper width, but ONLY if a real TTF is
-# provided. The stripped-down Alpine base image ships no fonts and no fc-match,
-# so without pinning --text-font to this bundled file the "Font size" slider
-# would silently have no effect (Pillow would fall back to its fixed-size
-# bitmap font). See print/text flow and Dockerfile.
-TEXT_FONT = "/app/DejaVuSansMono-Bold.ttf"
-PRINTER_MODEL = os.environ.get("PRINTER_MODEL", "").strip()
-PRINTER_BLUETOOTH = os.environ.get("PRINTER_BLUETOOTH", "").strip()
-
-
-def build_cmd(target_path=None, text=None, darkness=None, text_columns=None):
-    cmd = ["python3", TIMINI_CLI]
-    if PRINTER_BLUETOOTH:
-        cmd += ["--bluetooth", PRINTER_BLUETOOTH]
-    if PRINTER_MODEL:
-        cmd += ["--printer-model", PRINTER_MODEL]
-    if darkness is not None:
-        cmd += ["--darkness", str(darkness)]
-    if text is not None:
-        cmd += ["--text", text]
-        # Pin a real TrueType font so upstream's column->font-size scaling works
-        # in the font-shipless Alpine container (see TEXT_FONT above).
-        cmd += ["--text-font", TEXT_FONT]
-        if text_columns is not None:
-            cmd += ["--text-columns", str(text_columns)]
-    elif target_path is not None:
-        cmd += [target_path]
-    return cmd
-
-
-def run_print(cmd, timeout=60):
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        )
-    except subprocess.TimeoutExpired:
-        return False, "Print job timed out (Bluetooth connection may have hung)."
-
-    if result.returncode != 0:
-        return False, result.stderr.strip() or result.stdout.strip() or "Unknown error"
-    return True, result.stdout.strip()
+# --- Connection management ------------------------------------------------
+#
+# The bridge keeps one TiMini-Print connection open for as long as it runs, so
+# the printer never idles into its ~1 hour auto power-off (the firmware counts
+# *disconnected* time). The PrinterManager owns that connection: it reconnects
+# with a backoff when the link drops, and it supports handing the printer off
+# to a phone app (POST /printer/connection + the web UI toggle). See
+# printer_manager.py.
+#
+# PRINTER_MODEL / PRINTER_BLUETOOTH (set by run.sh from the add-on options)
+# are read inside the manager's device-resolution step.
 
 
 @app.route("/", methods=["GET"])
@@ -348,13 +426,17 @@ def print_text():
     darkness = parse_darkness(data.get("darkness"))
     text_columns = parse_text_columns(data.get("text_columns"))
 
-    with print_lock:
-        ok, output = run_print(
-            build_cmd(text=text, darkness=darkness, text_columns=text_columns)
-        )
-
-    if not ok:
-        return jsonify({"error": output}), 500
+    try:
+        output = manager.print_text(text, darkness=darkness, text_columns=text_columns)
+    except PrinterReleasedError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except PrinterUnavailableError as exc:
+        return jsonify({"error": str(exc)}), 502
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        log.exception("print/text failed")
+        return jsonify({"error": f"Print failed: {exc}"}), 500
     return jsonify({"status": "ok", "output": output})
 
 
@@ -372,15 +454,21 @@ def print_file():
         tmp_path = tmp.name
 
     try:
-        with print_lock:
-            ok, output = run_print(
-                build_cmd(target_path=tmp_path, darkness=darkness), timeout=90
-            )
+        output = manager.print_file(tmp_path, darkness=darkness)
+    except PrinterReleasedError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except PrinterUnavailableError as exc:
+        return jsonify({"error": str(exc)}), 502
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        log.exception("print/file failed")
+        return jsonify({"error": f"Print failed: {exc}"}), 500
     finally:
-        os.unlink(tmp_path)
-
-    if not ok:
-        return jsonify({"error": output}), 500
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
     return jsonify({"status": "ok", "output": output})
 
 
@@ -389,5 +477,43 @@ def health():
     return jsonify({"status": "up"})
 
 
+@app.route("/printer/status", methods=["GET"])
+def printer_status():
+    try:
+        return jsonify(manager.status())
+    except Exception as exc:  # noqa: BLE001
+        log.exception("printer/status failed")
+        return (
+            jsonify(
+                {
+                    "state": "unknown",
+                    "released": False,
+                    "model": "",
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@app.route("/printer/connection", methods=["POST"])
+def printer_connection():
+    data = request.get_json(force=True, silent=True) or {}
+    connected = data.get("connected")
+    if not isinstance(connected, bool):
+        return jsonify({"error": "'connected' must be true or false"}), 400
+    try:
+        manager.set_released(not connected)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("printer/connection failed")
+        return jsonify({"error": str(exc)}), 500
+    try:
+        return jsonify(manager.status())
+    except Exception:  # noqa: BLE001
+        return jsonify({"state": "unknown", "released": not connected, "model": "", "detail": "state changed"})
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8099)
+    manager.start()
+    atexit.register(manager.close)
+    app.run(host="0.0.0.0", port=8099, threaded=True)
