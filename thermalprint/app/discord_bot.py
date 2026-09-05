@@ -1,8 +1,11 @@
+import itertools
 import logging
 import os
+import random
 
 import aiohttp
 import discord
+from discord.ext import tasks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("discord_bot")
@@ -51,6 +54,25 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
+# Idle "custom status" text the bot cycles through while waiting for a print
+# job. Shuffled once at startup, then cycled in order so the same phrase
+# doesn't repeat back-to-back.
+IDLE_STATUSES = [
+    "waiting to print \U0001F5A8",
+    "talking to the printer service",
+    "wishing i was printing",
+    "counting thermal paper rolls",
+    "dreaming of receipts",
+    "watching for print jobs",
+    "thermal paper go brrr",
+]
+_status_cycle = itertools.cycle(random.sample(IDLE_STATUSES, len(IDLE_STATUSES)))
+
+
+@tasks.loop(seconds=120)
+async def rotate_status():
+    await client.change_presence(activity=discord.CustomActivity(name=next(_status_cycle)))
+
 
 def is_printable_attachment(attachment):
     if attachment.content_type and attachment.content_type.split(";")[0] in IMAGE_CONTENT_TYPES:
@@ -86,6 +108,8 @@ async def post_text_to_printer(session, text):
 @client.event
 async def on_ready():
     log.info("Logged in as %s, watching channel %s", client.user, CHANNEL_ID)
+    if not rotate_status.is_running():
+        rotate_status.start()
 
 
 @client.event
@@ -103,21 +127,26 @@ async def on_message(message):
     if not printable_attachments and not message.content.strip():
         return
 
-    async with aiohttp.ClientSession() as session:
-        if printable_attachments:
-            for attachment in printable_attachments:
+    rotate_status.stop()
+    await client.change_presence(activity=discord.CustomActivity(name="printing now \U0001F5A8"))
+    try:
+        async with aiohttp.ClientSession() as session:
+            if printable_attachments:
+                for attachment in printable_attachments:
+                    try:
+                        data = await attachment.read()
+                        ok, detail = await post_file_to_printer(session, attachment.filename, data)
+                    except Exception as exc:  # noqa: BLE001
+                        ok, detail = False, str(exc)
+                    await react_and_log(message, ok, detail)
+            elif message.content.strip():
                 try:
-                    data = await attachment.read()
-                    ok, detail = await post_file_to_printer(session, attachment.filename, data)
+                    ok, detail = await post_text_to_printer(session, message.content.strip())
                 except Exception as exc:  # noqa: BLE001
                     ok, detail = False, str(exc)
                 await react_and_log(message, ok, detail)
-        elif message.content.strip():
-            try:
-                ok, detail = await post_text_to_printer(session, message.content.strip())
-            except Exception as exc:  # noqa: BLE001
-                ok, detail = False, str(exc)
-            await react_and_log(message, ok, detail)
+    finally:
+        rotate_status.start()
 
 
 async def react_and_log(message, ok, detail):
